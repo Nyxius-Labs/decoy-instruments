@@ -21,7 +21,7 @@ all = ["anthropic", "openai"]
 decoybench = "decoybench.cli:main"
 
 [project.urls]
-Repository = "https://github.com/human-vc/decoy-instruments"
+Repository = "https://github.com/Nyxius-Labs/decoy-instruments"
 
 [tool.setuptools]
 packages = ["decoybench"]
