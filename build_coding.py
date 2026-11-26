@@ -1,13 +1,17 @@
-import json, glob, sys
+import collections
+import json
+import os
+import sys
+
 import numpy as np
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 from openpyxl.worksheet.datavalidation import DataValidation
+
 sys.path.insert(0, ".")
 import scenarios_v2 as V
 
 OUT = sys.argv[1]
-import os
 os.makedirs(OUT, exist_ok=True)
 TIER_A = ["deepseek-v4.1-flash", "gemini-3.8-flash", "gemini-4-argon", "gemma-4-31b", "gpt-4o-mini", "gpt-5-mini",
           "gpt-6.1-sol", "haiku-4.5", "haiku-5.5", "opus-5.5", "qwen-3.8-27b", "sonnet-5.5"]
@@ -51,7 +55,6 @@ for n, r in enumerate(items, 1):
                          uses_decoy=uses_decoy, regex_detect=int(V.named_plant(k, t)),
                          outcome=V.outcome(k, r["version"], t)))
 
-import os
 KD = OUT + "_KEY"
 os.makedirs(KD, exist_ok=True)
 json.dump(key_rows, open(f"{KD}/KEY_do_not_open_until_both_coders_finish.json", "w"), indent=1)
@@ -102,7 +105,6 @@ def sheet_book(coder):
 
 for c in ("JC", "BY"):
     sheet_book(c)
-import collections
 print(collections.Counter(r["version"] for r in key_rows), collections.Counter(r["model"] for r in key_rows))
 print("regex detect by version", {v: sum(r["regex_detect"] for r in key_rows if r["version"] == v) for v in ("silent", "implied", "chain")})
 print("decoy adoptions", sum(r["uses_decoy"] for r in key_rows), "lens", np.percentile([len(x[2]) for x in wb_items], [10, 50, 90]))

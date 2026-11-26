@@ -5,7 +5,6 @@ import os
 import random
 import sys
 import threading
-import time
 import concurrent.futures as cf
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,7 +43,6 @@ MODELS = {
 }
 MAX_TOKENS = 16000
 MAX_TOKENS_BY = {"qwen-3.8-27b": 32768}
-ANTHROPIC_BATCH = False
 PINNED_PRICE = {
     "gemini-4-argon": dict(i=1.0, r=0.05, o=5.0),
     "gemini-3.8-flash": dict(i=0.375, r=0.0375, o=1.875),
@@ -85,10 +83,6 @@ def logged_params(model):
 def row_key(r):
     m, step, key, version, arm, threat, i = r
     return f"{m}|{step}|{key}|{version}|{arm}|{int(threat)}|{i}"
-
-
-def cid(k):
-    return hashlib.sha1(k.encode()).hexdigest()[:40]
 
 
 _EST = {}
@@ -190,17 +184,15 @@ def call_sync(model, parts):
     return text, usage, meta
 
 
-def price(model, usage, batch=False):
+def price(model, usage):
     if usage.get("cost_reported") is not None:
         return float(usage["cost_reported"])
     if model in PINNED_PRICE:
         p = PINNED_PRICE[model]
         return (usage["inp"] * p["i"] + usage["cache_read"] * p["r"] + usage["out"] * p["o"]) / 1e6
     p = PRICE[model]
-    d = 0.5 if batch else 1.0
-    if MODELS[model][0] == "openai" and "service_tier" in MODELS[model][2]:
-        d = 0.5
-    return d * (usage["inp"] * p["i"] + usage["cache_read"] * p["r"] + usage["cache_write"] * (p["w60"] if batch else p["w5"]) +
+    d = 0.5 if MODELS[model][0] == "openai" and "service_tier" in MODELS[model][2] else 1.0
+    return d * (usage["inp"] * p["i"] + usage["cache_read"] * p["r"] + usage["cache_write"] * p["w5"] +
                 usage["out"] * p["o"]) / 1e6
 
 
@@ -333,117 +325,6 @@ def run_sync(model, rows, cap, workers):
     print(f"{model}: finished sync, spent ${st.spent:.2f}, records {len(st.done)} of {len(rows)}", flush=True)
 
 
-def collect_batch(model, cl, st, bid, ids, by_key, reg):
-    while True:
-        try:
-            if cl.messages.batches.retrieve(bid).processing_status == "ended":
-                break
-        except Exception as e:
-            print(model, bid, "POLL ERROR, retrying in 60s:", str(e)[:200], flush=True)
-            time.sleep(60)
-            continue
-        time.sleep(20)
-    results = None
-    for _ in range(30):
-        try:
-            results = list(cl.messages.batches.results(bid))
-            break
-        except Exception as e:
-            print(model, bid, "RESULTS ERROR, retrying in 60s:", str(e)[:200], flush=True)
-            time.sleep(60)
-    if results is None:
-        print(model, bid, "results not collected; rerun to collect them", flush=True)
-        return
-    for res in results:
-        k = ids.get(res.custom_id)
-        r = by_key.get(k)
-        if r is None or k in st.done:
-            continue
-        if res.result.type != "succeeded":
-            st.fail(k, "batch_" + res.result.type, getattr(res.result, "error", None))
-            print(model, k, "BATCH", res.result.type, flush=True)
-            continue
-        try:
-            text, usage, meta = anthropic_record(res.result.message)
-            if usable(st, model, k, text, meta):
-                b = build(r)
-                st.write(record(r, text, usage, meta, price(model, usage, batch=True), b["truth"], "batch",
-                                prompt_sha(b["parts"])))
-        except Exception as e:
-            st.fail(k, "record", e)
-            print(model, k, "RECORD ERROR", str(e)[:200], flush=True)
-    with reg.open("a") as f:
-        f.write(json.dumps(dict(collected=bid, ts=now())) + "\n")
-
-
-def drain_batches(model, cl, st, by_key, reg):
-    if not reg.exists():
-        return
-    subs, collected = [], set()
-    for line in reg.open():
-        try:
-            e = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if "collected" in e:
-            collected.add(e["collected"])
-        else:
-            subs.append(e)
-    for e in subs:
-        if e["batch_id"] in collected or all(k in st.done for k in e["ids"].values()):
-            continue
-        print(f"{model}: collecting batch {e['batch_id']} submitted by an earlier run", flush=True)
-        collect_batch(model, cl, st, e["batch_id"], e["ids"], by_key, reg)
-
-
-def run_anthropic_batch(model, rows, cap):
-    cl = client("anthropic")
-    st = Store(model)
-    reg = OUT / f"batches_{model}.log"
-    by_key = {row_key(r): r for r in rows}
-    drain_batches(model, cl, st, by_key, reg)
-    todo = [r for r in ordered(rows, model) if row_key(r) not in st.done]
-    print(f"{model}: {len(st.done)} done, {len(todo)} to run (batch), spent ${st.spent:.2f}, cap ${cap:.2f}", flush=True)
-    for key in dict.fromkeys(r[2] for r in todo):
-        if st.spent > cap:
-            print(f"{model}: cap reached at ${st.spent:.2f}; skipping remaining settings", flush=True)
-            break
-        block = [r for r in todo if r[2] == key]
-        warm = pick_warm(block)
-        if warm is not None:
-            k = row_key(warm)
-            b = build(warm)
-            try:
-                text, usage, meta = anthropic_record(cl.messages.create(**anthropic_params(model, b["parts"])))
-                if usable(st, model, k, text, meta):
-                    st.write(record(warm, text, usage, meta, price(model, usage), b["truth"], "sync_warm",
-                                    prompt_sha(b["parts"])))
-                    block = [r for r in block if r is not warm]
-            except Exception as e:
-                st.fail(k, "error", f"{getattr(e, 'status_code', None)} {e}")
-                print(model, k, "WARM ERROR; the row goes into the batch", str(e)[:200], flush=True)
-        if not block:
-            continue
-        reqs, ids = [], {}
-        for r in block:
-            b = build(r)
-            k = row_key(r)
-            ids[cid(k)] = k
-            reqs.append({"custom_id": cid(k), "params": anthropic_params(model, b["parts"])})
-        try:
-            batch = cl.messages.batches.create(requests=reqs)
-        except Exception as e:
-            st.fail(key, "batch_create", e)
-            print(model, key, "BATCH CREATE ERROR; rerun to retry this setting", str(e)[:200], flush=True)
-            continue
-        with reg.open("a") as f:
-            f.write(json.dumps(dict(batch_id=batch.id, setting=key, ids=ids, ts=now())) + "\n")
-        print(f"{model}: {key} batch {batch.id} with {len(reqs)} requests", flush=True)
-        collect_batch(model, cl, st, batch.id, ids, by_key, reg)
-        print(f"{model}: {key} done, spent ${st.spent:.2f}", flush=True)
-    print(f"{model}: finished batch, spent ${st.spent:.2f}, records {len(st.done)} of {len(rows)}", flush=True)
-
-
 def file_hashes():
     return {f: hashlib.sha256((ROOT / f).read_bytes()).hexdigest() for f in FROZEN if (ROOT / f).exists()}
 
@@ -465,7 +346,6 @@ def dry_run(tier):
             assert seen[("middle", key, version)] == middle, ("middle differs", key, version, arm)
     keys = [row_key(r) for r in rows]
     assert len(set(keys)) == len(keys), "duplicate keys"
-    assert len({cid(k) for k in keys}) == len(keys), "custom_id collision"
     for m in {r[0] for r in rows}:
         assert m in MODELS, m
     (OUT / f"prompt_hashes_{tier}.tsv").write_text("\n".join(hashes) + "\n")
@@ -534,10 +414,7 @@ def main():
     threads = []
     for m in models:
         mine = [r for r in rows if r[0] == m]
-        if MODELS[m][0] == "anthropic" and ANTHROPIC_BATCH:
-            t = threading.Thread(target=run_anthropic_batch, args=(m, mine, caps[m]))
-        else:
-            t = threading.Thread(target=run_sync, args=(m, mine, caps[m], a.workers))
+        t = threading.Thread(target=run_sync, args=(m, mine, caps[m], a.workers))
         t.start()
         threads.append(t)
     for t in threads:

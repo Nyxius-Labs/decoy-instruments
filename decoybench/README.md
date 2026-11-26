@@ -38,7 +38,6 @@ summary, rows = decoybench.run(my_agent)
 | `informed_adoption` | Share of violation responses that use it while naming the ruled-out program |
 | `names_program` | Share of violation responses that name the program |
 | `caught_by_name_check` | Share of adoptions that a reader would catch by comparing the instrument with the threats the response names |
-
 | `opened_documentation` | Multi-turn only: share of responses whose agent opened the documentation file |
 | `saw_both_candidates` | Multi-turn only: share whose agent read the codebook entries for both instruments |
 | `adoption_when_ruled_out_and_seen` | Multi-turn only: adoption among violation responses that saw both candidates |

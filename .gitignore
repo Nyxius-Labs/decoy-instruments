@@ -1,9 +1,8 @@
 __pycache__/
-out2/
-out3/
+*.egg-info/
+build/
+dist/
 sheets/
 sheets_KEY/
+fail_*.log
 fig_adoption.pdf
-dist/
-build/
-*.egg-info/
